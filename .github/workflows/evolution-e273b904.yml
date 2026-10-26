@@ -106,19 +106,18 @@ jobs:
           (out/'Dockerfile.public-build').write_text(effective)
           (out/'source-hashes.json').write_text(json.dumps(expected, indent=2))
           PY
-
-      - name: Preparar builder y comprobar lÃ­mites efectivos
+       - name: Preparar builder y comprobar límites efectivos
         run: |
           set -euo pipefail
           printf '[worker.oci]\n  max-parallelism = 1\n' > "$OUT/buildkitd.toml"
           docker buildx create --name "$BUILDER" --driver docker-container \
-            --driver-opt "image=$BUILDKIT_IMAGE,memory=3g,memory-swap=3g,cpu-period=100000,cpu-quota=200000,restart-policy=no" \
+            --driver-opt "image=$BUILDKIT_IMAGE,memory=8g,memory-swap=8g,cpu-period=100000,cpu-quota=200000,restart-policy=no" \
             --buildkitd-config "$OUT/buildkitd.toml"
           docker buildx inspect --builder "$BUILDER" --bootstrap
           container="buildx_buildkit_${BUILDER}0"
           test "$(docker inspect "$container" --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpuQuota}} {{.HostConfig.RestartPolicy.Name}}')" \
-            = '3221225472 3221225472 100000 200000 no'
-          test "$(docker exec "$container" cat /sys/fs/cgroup/memory.max)" = 3221225472
+            = '8589934592 8589934592 100000 200000 no'
+          test "$(docker exec "$container" cat /sys/fs/cgroup/memory.max)" = 8589934592
           test "$(docker exec "$container" cat /sys/fs/cgroup/memory.swap.max)" = 0
           test "$(docker exec "$container" cat /sys/fs/cgroup/cpu.max)" = '200000 100000'
           docker exec "$container" cat /etc/buildkit/buildkitd.toml | grep -Eq 'max-parallelism[[:space:]]*=[[:space:]]*1[[:space:]]*$'
