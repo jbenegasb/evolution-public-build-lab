@@ -184,6 +184,9 @@ jobs:
             --label 'org.opencontainers.image.licenses=LicenseRef-Evolution-API' \
             --label 'org.opencontainers.image.description=Unofficial laboratory build with audited instance-create-name-v1 patch; no activation or pairing' \
             --label 'io.evolution.upstream=https://github.com/evolution-foundation/evolution-api' \
+            --label "io.evolution.patch.id=$PATCH_ID" \
+            --label "io.evolution.patch.sha256=$PATCH_SHA256" \
+            --label "io.evolution.patch.manifest.sha256=$PATCH_MANIFEST_SHA256" \
             --tag "$IMAGE" --provenance=false \
             --metadata-file "$OUT/build-metadata.json" \
             --output "type=docker,dest=$OUT/evolution-amd64.tar" "$SOURCE" 2>&1 \
@@ -193,14 +196,23 @@ jobs:
 
       - name: Comprobar capacidad para importar y verificar el artefacto sin ejecutarlo
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          trap 'verification_exit=$?; printf "::error::Artifact verification failed at shell line %s (exit %s)\n" "$LINENO" "$verification_exit"; exit "$verification_exit"' ERR
+          require_equal() {
+            local check_name="$1" expected="$2" actual="$3"
+            if [ "$actual" != "$expected" ]; then
+              printf '::error::%s mismatch: expected=%s actual=%s\n' "$check_name" "$expected" "$actual"
+              return 1
+            fi
+          }
           bytes=$(stat -c %s "$OUT/evolution-amd64.tar")
           python3 "$RUNNER_TEMP/evolution-capacity.py" $((2*1024**3)) "$((2*bytes+1024**3))"
           docker load --input "$OUT/evolution-amd64.tar"
           docker image inspect "$IMAGE" --format \
             '{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}}}' > "$OUT/image-info.json"
           cid=$(docker create --name "evolution-metadata-$GITHUB_RUN_ID" --network none --entrypoint /bin/false "$IMAGE")
-          test "$(docker inspect "$cid" --format '{{.State.Running}}')" = false
+          actual=$(docker inspect "$cid" --format '{{.State.Running}}')
+          require_equal metadata-container-running false "$actual"
           docker cp "$cid:/evolution/package.json" "$OUT/effective-package.json"
           docker cp "$cid:/evolution/package-lock.json" "$OUT/effective-lock.json"
           docker cp "$cid:/evolution/node_modules/baileys/package.json" "$OUT/effective-baileys.json"
@@ -214,9 +226,12 @@ jobs:
           docker cp "$cid:/usr/share/evolution-build/instance-create-name-v1/instance-create-name-v1.patch" "$OUT/image-instance-fix.patch"
           cmp "$OUT/patch-manifest.json" "$OUT/image-patch-manifest.json"
           cmp "$OUT/instance-fix.patch" "$OUT/image-instance-fix.patch"
-          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.evolution.patch.id"}}')" = "$PATCH_ID"
-          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.evolution.patch.sha256"}}')" = "$PATCH_SHA256"
-          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.evolution.patch.manifest.sha256"}}')" = "$PATCH_MANIFEST_SHA256"
+          actual=$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.evolution.patch.id"}}')
+          require_equal patch-id-label "$PATCH_ID" "$actual"
+          actual=$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.evolution.patch.sha256"}}')
+          require_equal patch-sha256-label "$PATCH_SHA256" "$actual"
+          actual=$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.evolution.patch.manifest.sha256"}}')
+          require_equal patch-manifest-sha256-label "$PATCH_MANIFEST_SHA256" "$actual"
           python3 - <<'PY'
           import hashlib, json, os, pathlib
           out = pathlib.Path(os.environ['OUT'])
