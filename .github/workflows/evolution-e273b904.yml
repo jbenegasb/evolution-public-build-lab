@@ -9,7 +9,7 @@ on:
         required: true
         default: false
       pricing_reviewed_on:
-        description: 'Fecha UTC de revisiÃ³n de gratuidad Actions estÃ¡ndar pÃºblico y GHCR (AAAA-MM-DD)'
+        description: 'Fecha UTC de revisión de gratuidad Actions estándar público y GHCR (AAAA-MM-DD)'
         type: string
         required: true
 
@@ -42,7 +42,7 @@ jobs:
       BUILDER: evolution-public-${{ github.run_id }}
 
     steps:
-      - name: Comprobar autorizaciÃ³n, herramientas y capacidad del runner
+      - name: Comprobar autorización, herramientas y capacidad del runner
         env:
           PRICING_DATE: ${{ inputs.pricing_reviewed_on }}
         run: |
@@ -69,7 +69,7 @@ jobs:
           # Cloud runner guard; this does not change the laptop's preflight.
           python3 "$RUNNER_TEMP/evolution-capacity.py" $((8*1024**3)) $((10*1024**3))
 
-      - name: Obtener solamente la fuente pÃºblica fijada y conservar avisos
+      - name: Obtener solamente la fuente pública fijada y conservar avisos
         run: |
           set -euo pipefail
           git init -q "$SOURCE"
@@ -106,7 +106,8 @@ jobs:
           (out/'Dockerfile.public-build').write_text(effective)
           (out/'source-hashes.json').write_text(json.dumps(expected, indent=2))
           PY
-       - name: Preparar builder y comprobar límites efectivos
+
+      - name: Preparar builder y comprobar límites efectivos
         run: |
           set -euo pipefail
           printf '[worker.oci]\n  max-parallelism = 1\n' > "$OUT/buildkitd.toml"
@@ -193,7 +194,7 @@ jobs:
           docker pull --platform linux/amd64 "$reference"
           test "$(docker image inspect "$reference" --format '{{.Id}}')" = "$(docker image inspect "$IMAGE" --format '{{.Id}}')"
           {
-            echo '### Evolution - imagen de laboratorio verificada, sin ejecuciÃ³n del proveedor'
+            echo '### Evolution - imagen de laboratorio verificada, sin ejecución del proveedor'
             echo "- Fuente: evolution-foundation/evolution-api@$SOURCE_SHA"
             echo "- Referencia inmutable: \`$reference\`"
             echo "- Digest de manifiesto: \`$digest\`"
@@ -204,7 +205,7 @@ jobs:
             echo
             echo '```'
             echo '- LICENSE, NOTICE y TRADEMARKS.md originales incluidos en /usr/share/licenses/evolution-api/.'
-            echo '- Paquete GHCR nuevo: privado por defecto; el propietario decide su publicaciÃ³n pÃºblica.'
+            echo '- Paquete GHCR nuevo: privado por defecto; el propietario decide su publicación pública.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Detener solamente el builder propio del runner
