@@ -1,0 +1,24 @@
+{
+  "patch_id": "instance-create-name-v1",
+  "upstream_repository": "evolution-foundation/evolution-api",
+  "upstream_commit": "e273b904d53f5726970fd6a244ed9caa61dfeb9a",
+  "byte_convention": "SHA-256 of Git blob bytes with LF",
+  "original": {
+    "src/api/routes/instance.router.ts": "961a89e70ac160ccbf59f3a3027220217cb6401060a37c6841f4ece1d1b27b7f",
+    "src/api/controllers/instance.controller.ts": "d90927b41e30178a3aa9e0ee480827cc706010ae35458ad451f4c557e7e5b60d"
+  },
+  "patched": {
+    "src/api/routes/instance.router.ts": "3cf4e68720e1942bee59ebc656e5de5d2c68d6548abbb24a75db65fb8b9ecb0f",
+    "src/api/controllers/instance.controller.ts": "e3ccaa2502a5a0a32f038cef460a3dbe523864395ad20ceeb7f39e2f16d88807"
+  },
+  "preserved": {
+    "src/api/abstract/abstract.router.ts": "b467da92aea9fbbda6d57f0a2883d4c8aa88041cb2c1f4cbf0a960b9d28ee310",
+    "src/validate/instance.schema.ts": "05f3663eb52bec2f5b6922cb7cd4bcb2a924236e16d272392fe6d62b9ec8e63a"
+  },
+  "patch_sha256": "740f73555c97bf3179d9fd94afd424b759039ebe42d98f2a55f871acc8c9ece7",
+  "focused_test_sha256": "a5eba50599dd90c68d07f78c0793985a5df3b838a744c78faef6e8fbcbc86ed0",
+  "changes": [
+    "Forward validated creation DTO",
+    "Reject missing/non-string/trim-empty instanceName before try and side effects"
+  ]
+}

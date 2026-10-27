@@ -1,0 +1,32 @@
+diff --git a/src/api/controllers/instance.controller.ts b/src/api/controllers/instance.controller.ts
+index 4d46805..d59bee0 100644
+--- a/src/api/controllers/instance.controller.ts
++++ b/src/api/controllers/instance.controller.ts
+@@ -35,9 +35,12 @@ export class InstanceController {
+   private readonly logger = new Logger('InstanceController');
+ 
+   public async createInstance(instanceData: InstanceDto) {
+-    try {
+-      instanceData.instanceName = instanceData.instanceName?.trim();
++    if (typeof instanceData?.instanceName !== 'string' || !instanceData.instanceName.trim()) {
++      throw new BadRequestException('instanceName must be a non-empty string');
++    }
++    instanceData.instanceName = instanceData.instanceName.trim();
+ 
++    try {
+       const instance = channelController.init(instanceData, {
+         configService: this.configService,
+         eventEmitter: this.eventEmitter,
+diff --git a/src/api/routes/instance.router.ts b/src/api/routes/instance.router.ts
+index 3559893..228e87d 100644
+--- a/src/api/routes/instance.router.ts
++++ b/src/api/routes/instance.router.ts
+@@ -19,7 +19,7 @@ export class InstanceRouter extends RouterBroker {
+           request: req,
+           schema: instanceSchema,
+           ClassRef: InstanceDto,
+-          execute: (instance) => instanceController.createInstance(instance),
++          execute: (_instance, data) => instanceController.createInstance(data),
+         });
+ 
+         return res.status(HttpStatus.CREATED).json(response);
