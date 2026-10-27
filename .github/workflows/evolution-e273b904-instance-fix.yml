@@ -1,0 +1,330 @@
+name: Evolution e273b904 - instance-name-v1
+
+on:
+  workflow_dispatch:
+    inputs:
+      prerequisites_reviewed:
+        description: 'Requisitos de coste cero, permisos y licencia revisados; sin activar licencia'
+        type: boolean
+        required: true
+        default: false
+      pricing_reviewed_on:
+        description: 'Fecha UTC de revisión de gratuidad Actions estándar público y GHCR (AAAA-MM-DD)'
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: evolution-public-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.repository.private == false &&
+      github.repository == vars.EVOLUTION_BUILD_REPOSITORY &&
+      github.repository == 'jbenegasb/evolution-public-build-lab' &&
+      github.actor == github.repository_owner &&
+      github.run_attempt == 1 && inputs.prerequisites_reviewed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      PATCH_ID: instance-create-name-v1
+      PATCH_MANIFEST_SHA256: e7db04b3232ba65ff8f725593f5425ef1f3c9bea1787228327580267002289c9
+      ORIGINAL_DIGEST: sha256:1b3b2bdead267899138d7a70f5ebd56333fee1ec478f9ed99f755e644a291067
+      ORIGINAL_IMAGE_ID: sha256:77034059b2aa17a146f59536b78046249d19494b35e16569f7bc65b5f667ed44
+      SOURCE_SHA: e273b904d53f5726970fd6a244ed9caa61dfeb9a
+      NODE_BASE: node:24-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53
+      BUILDKIT_IMAGE: moby/buildkit@sha256:de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa
+      BUILDER: evolution-public-${{ github.run_id }}
+
+    steps:
+      - name: Comprobar autorización, herramientas y capacidad del runner
+        env:
+          PRICING_DATE: ${{ inputs.pricing_reviewed_on }}
+        run: |
+          set -euo pipefail
+          test "$PRICING_DATE" = "$(date -u +%F)"
+          test "$RUNNER_ARCH" = X64
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          for tool in git python3 docker curl timeout; do command -v "$tool" >/dev/null; done
+          docker version --format '{{.Server.Version}}'
+          docker buildx version
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${SOURCE_SHA}-${PATCH_ID}-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+          echo "SOURCE=$RUNNER_TEMP/evolution-source" >> "$GITHUB_ENV"
+          echo "OUT=$RUNNER_TEMP/evolution-output" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/evolution-output"
+          cat > "$RUNNER_TEMP/evolution-capacity.py" <<'PY'
+          import json, os, pathlib, shutil, sys
+          mem = dict(line.split(':', 1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines())
+          available = int(mem['MemAvailable'].split()[0]) * 1024
+          free = shutil.disk_usage(os.environ['RUNNER_TEMP']).free
+          print(json.dumps({'available_bytes': available, 'disk_free_bytes': free}))
+          if available < int(sys.argv[1]) or free < int(sys.argv[2]):
+              raise SystemExit('Runner capacity insufficient; no cleanup or automatic retry')
+          PY
+          # Cloud runner guard; this does not change the laptop's preflight.
+          python3 "$RUNNER_TEMP/evolution-capacity.py" $((8*1024**3)) $((10*1024**3))
+
+      - name: Obtener solamente la fuente pública fijada y conservar avisos
+        run: |
+          set -euo pipefail
+          git init -q "$SOURCE"
+          git -C "$SOURCE" -c credential.helper= fetch --depth=1 \
+            https://github.com/evolution-foundation/evolution-api.git "$SOURCE_SHA"
+          git -C "$SOURCE" -c core.autocrlf=false checkout -q --detach FETCH_HEAD
+          test "$(git -C "$SOURCE" rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git -C "$SOURCE" status --porcelain)"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          src, out = pathlib.Path(os.environ['SOURCE']), pathlib.Path(os.environ['OUT'])
+          # SHA-256 of Git blob bytes (LF), rather than the Windows CRLF checkout.
+          expected = {
+              'package.json': 'e51a802b606aef9eba71747c57f5685f416ca0382389d7f5f125d952ab41be09',
+              'package-lock.json': '8f21ce958d38a0ac14de52ae837ce34794720784ff2daeff4a50cb13d9e72147',
+              'Dockerfile': 'b548497c94a44e2ef247142cd0ae69a61b4aa4118bec15a1eea3da5e61f0cd87',
+              'LICENSE': 'b0af8b0d56a9425cbf09111a5778bcad6c522221c4178fdd9fab6513599f36d5',
+          }
+          for name, digest in expected.items():
+              assert hashlib.sha256((src/name).read_bytes()).hexdigest() == digest, name
+          package = json.loads((src/'package.json').read_text())
+          lock = json.loads((src/'package-lock.json').read_text())
+          assert package['version'] == '2.4.0'
+          assert package['dependencies']['baileys'] == '7.0.0-rc13'
+          assert lock['packages']['node_modules/baileys']['version'] == '7.0.0-rc13'
+          original = (src/'Dockerfile').read_text()
+          assert original.count('FROM node:24-alpine AS ') == 2
+          # Packaging changes only: pin the observed base; include original legal notices.
+          effective = '# Packaging changes: base pinned and original legal notices included.\n'
+          effective += original.replace('FROM node:24-alpine AS ', 'FROM '+os.environ['NODE_BASE']+' AS ')
+          for name in ('LICENSE', 'NOTICE', 'TRADEMARKS.md'):
+              assert (src/name).is_file(), name
+              effective += '\nCOPY '+name+' /usr/share/licenses/evolution-api/'+name+'\n'
+          (out/'Dockerfile.public-build').write_text(effective)
+          (out/'source-hashes.json').write_text(json.dumps(expected, indent=2))
+          PY
+
+      - name: Obtener y aplicar exclusivamente el parche auditado
+        run: |
+          set -euo pipefail
+          control="$RUNNER_TEMP/public-build-definition"
+          git init -q "$control"
+          git -C "$control" -c credential.helper= fetch --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -C "$control" show "$GITHUB_SHA:patches/instance-create-name-v1.patch" > "$OUT/instance-fix.patch"
+          git -C "$control" show "$GITHUB_SHA:patches/instance-create-name-v1-manifest.json" > "$OUT/patch-manifest.json"
+          git -C "$control" show "$GITHUB_SHA:tests/instance-create-name-v1.test.cjs" > "$OUT/focused.test.cjs"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil, subprocess
+          src, out = pathlib.Path(os.environ['SOURCE']), pathlib.Path(os.environ['OUT'])
+          sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          assert sha(out/'patch-manifest.json') == os.environ['PATCH_MANIFEST_SHA256']
+          m = json.loads((out/'patch-manifest.json').read_text())
+          assert m['upstream_repository'] == 'evolution-foundation/evolution-api'
+          assert m['upstream_commit'] == os.environ['SOURCE_SHA'] and m['patch_id'] == os.environ['PATCH_ID']
+          targets = {'src/api/routes/instance.router.ts', 'src/api/controllers/instance.controller.ts'}
+          preserved = {'src/api/abstract/abstract.router.ts', 'src/validate/instance.schema.ts'}
+          assert set(m['original']) == set(m['patched']) == targets
+          assert set(m['preserved']) == preserved
+          assert sha(out/'instance-fix.patch') == m['patch_sha256']
+          assert sha(out/'focused.test.cjs') == m['focused_test_sha256']
+          for name, digest in (m['original'] | m['preserved']).items():
+              assert sha(src/name) == digest, 'Original source mismatch: '+name
+          subprocess.run(['git','apply','--check','--whitespace=error-all',str(out/'instance-fix.patch')],cwd=src,check=True)
+          subprocess.run(['git','apply','--whitespace=error-all',str(out/'instance-fix.patch')],cwd=src,check=True)
+          changed = subprocess.check_output(['git','diff','--name-only'],cwd=src,text=True).splitlines()
+          assert set(changed) == targets
+          for name, digest in (m['patched'] | m['preserved']).items():
+              assert sha(src/name) == digest, 'Patched/protected source mismatch: '+name
+          audit = src/'build-audit'
+          audit.mkdir()
+          for source, destination in [('instance-fix.patch','instance-create-name-v1.patch'),('patch-manifest.json','manifest.json')]:
+              shutil.copyfile(out/source,audit/destination)
+          with (out/'Dockerfile.public-build').open('a') as f:
+              f.write('\n# Audited modification record; runtime entrypoint and license mechanism unchanged.\n')
+              f.write('COPY build-audit/ /usr/share/evolution-build/instance-create-name-v1/\n')
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+              f.write('PATCH_SHA256='+m['patch_sha256']+'\n')
+          PY
+
+      - name: Preparar builder y comprobar límites efectivos
+        run: |
+          set -euo pipefail
+          printf '[worker.oci]\n  max-parallelism = 1\n' > "$OUT/buildkitd.toml"
+          docker buildx create --name "$BUILDER" --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE,memory=3g,memory-swap=3g,cpu-period=100000,cpu-quota=200000,restart-policy=no" \
+            --buildkitd-config "$OUT/buildkitd.toml"
+          docker buildx inspect --builder "$BUILDER" --bootstrap
+          container="buildx_buildkit_${BUILDER}0"
+          test "$(docker inspect "$container" --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpuQuota}} {{.HostConfig.RestartPolicy.Name}}')" \
+            = '3221225472 3221225472 100000 200000 no'
+          test "$(docker exec "$container" cat /sys/fs/cgroup/memory.max)" = 3221225472
+          test "$(docker exec "$container" cat /sys/fs/cgroup/memory.swap.max)" = 0
+          test "$(docker exec "$container" cat /sys/fs/cgroup/cpu.max)" = '200000 100000'
+          docker exec "$container" cat /etc/buildkit/buildkitd.toml | grep -Eq 'max-parallelism[[:space:]]*=[[:space:]]*1[[:space:]]*$'
+
+      - name: Construir una vez linux/amd64 y exportar en el runner
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/evolution-capacity.py" $((8*1024**3)) $((10*1024**3))
+          timeout --signal=TERM --kill-after=15s 40m docker buildx build \
+            --builder "$BUILDER" --platform linux/amd64 --progress plain \
+            --file "$OUT/Dockerfile.public-build" \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label 'org.opencontainers.image.version=2.4.0' \
+            --label 'org.opencontainers.image.licenses=LicenseRef-Evolution-API' \
+            --label 'org.opencontainers.image.description=Unofficial laboratory build with audited instance-create-name-v1 patch; no activation or pairing' \
+            --label 'io.evolution.upstream=https://github.com/evolution-foundation/evolution-api' \
+            --tag "$IMAGE" --provenance=false \
+            --metadata-file "$OUT/build-metadata.json" \
+            --output "type=docker,dest=$OUT/evolution-amd64.tar" "$SOURCE" 2>&1 \
+            | sed -E 's/(Database URL:).*/\1 [redacted]/'
+          docker stop --time 15 "buildx_buildkit_${BUILDER}0"
+          sha256sum "$OUT/evolution-amd64.tar" > "$OUT/archive.sha256"
+
+      - name: Comprobar capacidad para importar y verificar el artefacto sin ejecutarlo
+        run: |
+          set -euo pipefail
+          bytes=$(stat -c %s "$OUT/evolution-amd64.tar")
+          python3 "$RUNNER_TEMP/evolution-capacity.py" $((2*1024**3)) "$((2*bytes+1024**3))"
+          docker load --input "$OUT/evolution-amd64.tar"
+          docker image inspect "$IMAGE" --format \
+            '{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}}}' > "$OUT/image-info.json"
+          cid=$(docker create --name "evolution-metadata-$GITHUB_RUN_ID" --network none --entrypoint /bin/false "$IMAGE")
+          test "$(docker inspect "$cid" --format '{{.State.Running}}')" = false
+          docker cp "$cid:/evolution/package.json" "$OUT/effective-package.json"
+          docker cp "$cid:/evolution/package-lock.json" "$OUT/effective-lock.json"
+          docker cp "$cid:/evolution/node_modules/baileys/package.json" "$OUT/effective-baileys.json"
+          for file in LICENSE NOTICE TRADEMARKS.md; do
+            docker cp "$cid:/usr/share/licenses/evolution-api/$file" "$OUT/$file"
+            cmp "$SOURCE/$file" "$OUT/$file"
+          done
+          docker cp "$cid:/evolution/dist/main.js.map" "$OUT/effective-main.js.map"
+          docker cp "$cid:/evolution/dist/main.js" "$OUT/effective-main.js"
+          docker cp "$cid:/usr/share/evolution-build/instance-create-name-v1/manifest.json" "$OUT/image-patch-manifest.json"
+          docker cp "$cid:/usr/share/evolution-build/instance-create-name-v1/instance-create-name-v1.patch" "$OUT/image-instance-fix.patch"
+          cmp "$OUT/patch-manifest.json" "$OUT/image-patch-manifest.json"
+          cmp "$OUT/instance-fix.patch" "$OUT/image-instance-fix.patch"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.evolution.patch.id"}}')" = "$PATCH_ID"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.evolution.patch.sha256"}}')" = "$PATCH_SHA256"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.evolution.patch.manifest.sha256"}}')" = "$PATCH_MANIFEST_SHA256"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          out = pathlib.Path(os.environ['OUT'])
+          info = json.loads((out/'image-info.json').read_text())
+          package = json.loads((out/'effective-package.json').read_text())
+          baileys = json.loads((out/'effective-baileys.json').read_text())
+          hashes = json.loads((out/'source-hashes.json').read_text())
+          assert info['os'] == 'linux' and info['architecture'] == 'amd64'
+          assert info['revision'] == os.environ['SOURCE_SHA']
+          assert package['version'] == '2.4.0' and baileys['version'] == '7.0.0-rc13'
+          for image_name, source_name in [('effective-package.json','package.json'), ('effective-lock.json','package-lock.json')]:
+              assert hashlib.sha256((out/image_name).read_bytes()).hexdigest() == hashes[source_name]
+          import tarfile
+          with tarfile.open(out/'evolution-amd64.tar') as archive:
+              archived = json.load(archive.extractfile('manifest.json'))
+              assert len(archived) == 1
+              config_bytes = archive.extractfile(archived[0]['Config']).read()
+          config = json.loads(config_bytes)
+          assert config['os'] == 'linux' and config['architecture'] == 'amd64'
+          info['docker_inspect_id'] = info.pop('id')
+          info['image_id'] = 'sha256:'+hashlib.sha256(config_bytes).hexdigest()
+          assert info['image_id'] != os.environ['ORIGINAL_IMAGE_ID']
+          m = json.loads((out/'patch-manifest.json').read_text())
+          mapping = json.loads((out/'effective-main.js.map').read_text())
+          reconstructed = out/'verified-source'
+          for name, digest in (m['patched'] | m['preserved']).items():
+              hits = [i for i,p in enumerate(mapping['sources']) if p.replace('\\','/').endswith(name)]
+              assert len(hits) == 1, name
+              content = mapping['sourcesContent'][hits[0]]
+              assert hashlib.sha256(content.encode()).hexdigest() == digest, 'Bundled source mismatch: '+name
+              target = reconstructed/name
+              target.parent.mkdir(parents=True,exist_ok=True)
+              target.write_text(content)
+          info.update({'evolution': package['version'], 'baileys': baileys['version'], 'provider_started': False,
+              'patch_id': m['patch_id'], 'patch_sha256': m['patch_sha256'],
+              'patch_manifest_sha256': os.environ['PATCH_MANIFEST_SHA256'],
+              'compiled_js_sha256': hashlib.sha256((out/'effective-main.js').read_bytes()).hexdigest(),
+              'bundled_source_hashes_verified': True})
+          (out/'verification.json').write_text(json.dumps(info, indent=2))
+          PY
+
+      - name: Ejecutar solo cuatro pruebas focalizadas sin proveedor ni red
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --memory 256m --memory-swap 256m --cpus 1 --read-only \
+            --entrypoint node \
+            --mount "type=bind,source=$OUT/verified-source,target=/source,readonly" \
+            --mount "type=bind,source=$OUT/focused.test.cjs,target=/focused.test.cjs,readonly" \
+            "$IMAGE" --test --test-reporter=tap /focused.test.cjs | tee "$OUT/focused-tests.tap"
+          grep -qx '# tests 4' "$OUT/focused-tests.tap"
+          grep -qx '# pass 4' "$OUT/focused-tests.tap"
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path(os.environ['OUT'])/'verification.json'
+          info = json.loads(p.read_text())
+          info['focused_tests_passed'] = 4
+          p.write_text(json.dumps(info,indent=2))
+          PY
+
+      - name: Publicar solo la imagen verificada en GHCR y comprobar su digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE" | tee "$OUT/push.log"
+          digest=$(python3 - <<'PY'
+          import os, pathlib, re
+          matches = re.findall(r'digest: (sha256:[0-9a-f]{64})\b', (pathlib.Path(os.environ['OUT'])/'push.log').read_text())
+          assert len(matches) == 1, 'Expected one registry manifest digest'
+          print(matches[0])
+          PY
+          )
+          test "$digest" != "$ORIGINAL_DIGEST"
+          reference="${IMAGE%:*}@$digest"
+          docker pull --platform linux/amd64 "$reference"
+          docker buildx imagetools inspect "$reference" --raw > "$OUT/registry-manifest.json"
+          export REGISTRY_DIGEST="$digest"
+          python3 - <<'PY'
+          import json, os, pathlib
+          out = pathlib.Path(os.environ['OUT'])
+          info = json.loads((out/'verification.json').read_text())
+          manifest = json.loads((out/'registry-manifest.json').read_text())
+          assert manifest['config']['digest'] == info['image_id']
+          info['registry_manifest_digest'] = os.environ['REGISTRY_DIGEST']
+          (out/'verification.json').write_text(json.dumps(info,indent=2))
+          PY
+          {
+            echo '### Evolution - imagen de laboratorio verificada, sin ejecución del proveedor'
+            echo "- Fuente: evolution-foundation/evolution-api@$SOURCE_SHA"
+            echo "- Parche aplicado: $PATCH_ID; SHA-256 $PATCH_SHA256"
+            echo "- Manifiesto auditado: $PATCH_MANIFEST_SHA256"
+            echo "- Digest distinto del original: $ORIGINAL_DIGEST"
+            echo "- Referencia inmutable: \`$reference\`"
+            echo "- Digest de manifiesto: \`$digest\`"
+            echo '- Plataforma: linux/amd64; Docker archive SHA-256 (archivo temporal del runner):'
+            cat "$OUT/archive.sha256"
+            echo '```json'
+            cat "$OUT/verification.json"
+            echo
+            echo '```'
+            echo '- LICENSE, NOTICE y TRADEMARKS.md originales incluidos en /usr/share/licenses/evolution-api/.'
+            echo '- Paquete GHCR nuevo: privado por defecto; el propietario decide su publicación pública.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Detener solamente el builder propio del runner
+        if: always()
+        run: |
+          if docker container inspect "buildx_buildkit_${BUILDER}0" >/dev/null 2>&1; then
+            docker stop --time 10 "buildx_buildkit_${BUILDER}0"
+          fi
